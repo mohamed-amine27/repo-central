@@ -24,6 +24,9 @@ on:
         required: true
       SAMBANOVA_API_KEY:
         required: true
+      TOKEN_API:
+        required: true
+      
 
     outputs:
       decision:
@@ -55,7 +58,7 @@ jobs:
         with:
           repository: mohamed-amine27/repo-central   # ← modifier avec ton username
           path:       repo-central
-          token:      ${{ secrets.TOKEN_API }}
+          TOKEN_API:         ${{ secrets.TOKEN_API }} 
 
       # ── 3. Setup Python ───────────────────────────────────
       - name: 🐍 Setup Python ${{ inputs.python_version }}

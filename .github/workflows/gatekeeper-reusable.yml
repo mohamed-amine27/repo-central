@@ -55,7 +55,7 @@ jobs:
         with:
           repository: mohamed-amine27/repo-central   # ← modifier avec ton username
           path:       repo-central
-          token:      ${{ secrets.GITHUB_TOKEN }}
+          token:      ${{ secrets.TOKEN_API }}
 
       # ── 3. Setup Python ───────────────────────────────────
       - name: 🐍 Setup Python ${{ inputs.python_version }}
@@ -66,7 +66,7 @@ jobs:
 
       # ── 4. Installer dépendances agent ────────────────────
       - name: 📦 Install agent dependencies
-        run: pip install -r repo_central/requirements.txt
+        run: pip install -r repo-central/requirements.txt
 
       # ── 5. Installer sonar-scanner ────────────────────────
       - name: 🔧 Install sonar-scanner
@@ -80,9 +80,9 @@ jobs:
           SONARQUBE_URL:     "https://singular-exploit-mockup.ngrok-free.dev"
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
           SONAR_SCANNER_CMD: "sonar-scanner"
-          PYTHONPATH:        ${{ github.workspace }}/repo_central/agent_ci
+          PYTHONPATH:        ${{ github.workspace }}/repo-central/agent_ci
         run: |
-          python repo_central/agent_ci/agent_gatekeeper.py \
+          python repo-central/agent_ci/agent_gatekeeper.py \
             ${{ inputs.project_key }} \
             --path ./project_code \
             --branch ${{ inputs.branch || github.head_ref }}

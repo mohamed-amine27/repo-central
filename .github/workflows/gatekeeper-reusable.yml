@@ -53,8 +53,8 @@ jobs:
       - name: 📥 Checkout repo-central
         uses: actions/checkout@v4
         with:
-          repository: mohamedmaannai/repo-central   # ← modifier avec ton username
-          path:       repo_central
+          repository: mohamed-amine27/repo-central   # ← modifier avec ton username
+          path:       repo-central
           token:      ${{ secrets.GITHUB_TOKEN }}
 
       # ── 3. Setup Python ───────────────────────────────────

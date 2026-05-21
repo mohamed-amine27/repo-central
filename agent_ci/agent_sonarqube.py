@@ -43,7 +43,7 @@ from langchain_core.messages import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.graph import StateGraph, END
 
-from models.state import SonarState
+from agent_ci.models.state import SonarState
 from settings.config import (
     SONARQUBE_TOKEN,
     SONARQUBE_URL,

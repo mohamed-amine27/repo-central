@@ -74,6 +74,8 @@ jobs:
       # ── 5. Installer sonar-scanner ────────────────────────
       - name: 🔧 Install sonar-scanner
         run: npm install -g sonarqube-scanner
+      - name: 🔧 Install sonarqube-api-mcp
+        run: npm install -g sonarqube-api-mcp
 
       # ── 6. Lancer le Gatekeeper ───────────────────────────
       - name: 🚦 Run Gatekeeper

@@ -83,7 +83,7 @@ jobs:
           SONARQUBE_URL:     "https://singular-exploit-mockup.ngrok-free.dev"
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
           SONAR_SCANNER_CMD: "sonar-scanner"
-        working-directory: repo_central/agent_ci
+        working-directory: repo-central/agent_ci
         run: |
           python agent_gatekeeper.py \
             ${{ inputs.project_key }} \

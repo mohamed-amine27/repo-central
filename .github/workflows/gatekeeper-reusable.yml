@@ -1,64 +1,63 @@
-name: 🚦 Gatekeeper Reusable
+name: 🚦 Gatekeeper Reusable (PR Mode)
 
+# ════════════════════════════════════════════════════════════
+# Scan PR incrémental — analyse uniquement les fichiers modifiés
+# Cache massif : sonar-scanner + JRE + dépendances réutilisés
+# Durée moyenne : 30s-1min après premier run
+# ════════════════════════════════════════════════════════════
 
 on:
   workflow_call:
     inputs:
       project_key:
-        description: "Clé du projet SonarQube"
-        required:    true
-        type:        string
+        required: true
+        type: string
       branch:
-        description: "Branche analysée"
-        required:    false
-        default:     "main"
-        type:        string
+        required: false
+        default: "main"
+        type: string
       python_version:
-        description: "Version Python du projet"
-        required:    false
-        default:     "3.10"
-        type:        string
+        required: false
+        default: "3.10"
+        type: string
 
     secrets:
       SONARQUBE_TOKEN:
         required: true
       SAMBANOVA_API_KEY:
         required: true
-      TOKEN_API:
-        required: true
-      
 
     outputs:
       decision:
-        description: "PASS ou BLOCK"
         value: ${{ jobs.gatekeeper.outputs.decision }}
       violations_count:
-        description: "Nombre de violations"
         value: ${{ jobs.gatekeeper.outputs.violations_count }}
 
 jobs:
   gatekeeper:
     name: 🚦 Quality Gatekeeper
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     outputs:
       decision:         ${{ steps.gate.outputs.decision }}
       violations_count: ${{ steps.gate.outputs.violations_count }}
 
     steps:
-      # ── 1. Checkout du repo appelant (code à analyser) ────
+      # ── 1. Checkout code (avec historique pour diff PR) ───
       - name: 📥 Checkout code du projet
         uses: actions/checkout@v4
         with:
-          path: project_code
+          path:         project_code
+          fetch-depth:  0
 
-      # ── 2. Checkout du repo central (agent) ───────────────
+      # ── 2. Checkout repo-central ──────────────────────────
       - name: 📥 Checkout repo-central
         uses: actions/checkout@v4
         with:
-          repository: mohamed-amine27/repo-central   # ← modifier avec ton username
+          repository: mohamed-amine27/repo-central
           path:       repo-central
-          TOKEN_API:         ${{ secrets.TOKEN_API }} 
+          token:      ${{ secrets.GITHUB_TOKEN }}
 
       # ── 3. Setup Python ───────────────────────────────────
       - name: 🐍 Setup Python ${{ inputs.python_version }}
@@ -66,105 +65,124 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
           cache: pip
+          cache-dependency-path: repo-central/requirements.txt
 
-      # ── 4. Installer dépendances agent ────────────────────
-      - name: 📦 Install agent dependencies
+      # ── 4. Cache JRE + npm (gain massif après 1er run) ────
+      - name: 💾 Cache SonarScanner JRE & npm globals
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.sonar
+            ~/.npm-global
+          key: ${{ runner.os }}-sonar-scanner-v2
+
+      # ── 5. Installer dépendances Python ───────────────────
+      - name: 📦 Install Python deps
         run: pip install -r repo-central/requirements.txt
 
-      # ── 5. Installer sonar-scanner ────────────────────────
-      - name: 🔧 Install sonar-scanner
-        run: npm install -g sonarqube-scanner
-      - name: 🔧 Install sonarqube-api-mcp
-        run: npm install -g sonarqube-api-mcp
+      # ── 6. Installer sonar-scanner + MCP ──────────────────
+      - name: 🔧 Install sonar-scanner + MCP
+        run: |
+          npm config set prefix '~/.npm-global'
+          npm install -g sonarqube-scanner sonarqube-api-mcp
+          echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
 
-      # ── 6. Lancer le Gatekeeper ───────────────────────────
+      # ── 7. Scan SonarQube en mode PR (incrémental) ────────
+      - name: 🔍 SonarQube PR Scan (incrémental)
+        working-directory: project_code
+        env:
+          SONAR_TOKEN:    ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: "https://singular-exploit-mockup.ngrok-free.dev"
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "🔀 Mode Pull Request — scan incrémental (fichiers modifiés uniquement)"
+            sonar-scanner \
+              -Dsonar.projectKey=${{ inputs.project_key }} \
+              -Dsonar.projectName=${{ inputs.project_key }} \
+              -Dsonar.sources=. \
+              -Dsonar.host.url=$SONAR_HOST_URL \
+              -Dsonar.token=$SONAR_TOKEN \
+              -Dsonar.pullrequest.key=${{ github.event.pull_request.number }} \
+              -Dsonar.pullrequest.branch=${{ github.head_ref }} \
+              -Dsonar.pullrequest.base=${{ github.base_ref }} \
+              -Dsonar.scm.provider=git
+          else
+            echo "📊 Mode Branch — scan complet"
+            sonar-scanner \
+              -Dsonar.projectKey=${{ inputs.project_key }} \
+              -Dsonar.projectName=${{ inputs.project_key }} \
+              -Dsonar.sources=. \
+              -Dsonar.host.url=$SONAR_HOST_URL \
+              -Dsonar.token=$SONAR_TOKEN
+          fi
+
+      # ── 8. Attendre indexation SonarQube ──────────────────
+      - name: ⏳ Wait for SonarQube indexing
+        run: sleep 5
+
+      # ── 9. Lancer Gatekeeper (lit les résultats) ──────────
       - name: 🚦 Run Gatekeeper
         id:   gate
+        timeout-minutes: 3
         env:
           SONARQUBE_TOKEN:   ${{ secrets.SONARQUBE_TOKEN }}
           SONARQUBE_URL:     "https://singular-exploit-mockup.ngrok-free.dev"
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
           SONAR_SCANNER_CMD: "sonar-scanner"
-        working-directory: repo-central/agent_ci
+          CI:                "true"
+          GITHUB_ACTIONS:    "true"
         run: |
+          cd repo-central/agent_ci
           python agent_gatekeeper.py \
             ${{ inputs.project_key }} \
-            --path ../../project_code \
+            --path ${{ github.workspace }}/project_code \
             --branch ${{ inputs.branch || github.head_ref }}
 
-          # Extraire décision et violations pour outputs
-          DECISION=$(python -c "
-          import json
-          with open('gatekeeper_report.json') as f:
-              r = json.load(f)
-          print(r['decision'])
-          ")
+          cp gatekeeper_report.json ${{ github.workspace }}/gatekeeper_report.json
+          cd ${{ github.workspace }}
 
-          VIOLATIONS=$(python -c "
-          import json
-          with open('gatekeeper_report.json') as f:
-              r = json.load(f)
-          print(len(r['violations']))
-          ")
+          DECISION=$(python -c "import json; print(json.load(open('gatekeeper_report.json'))['decision'])")
+          VIOLATIONS=$(python -c "import json; print(len(json.load(open('gatekeeper_report.json'))['violations']))")
 
-          echo "decision=$DECISION"            >> $GITHUB_OUTPUT
-          echo "violations_count=$VIOLATIONS"  >> $GITHUB_OUTPUT
+          echo "decision=$DECISION"           >> $GITHUB_OUTPUT
+          echo "violations_count=$VIOLATIONS" >> $GITHUB_OUTPUT
           echo "✅ Decision: $DECISION | Violations: $VIOLATIONS"
 
-      # ── 7. Résumé dans GitHub Actions UI ──────────────────
+      # ── 10. Résumé dans GitHub Actions UI ─────────────────
       - name: 📊 Gate Summary
         if: always()
         run: |
           if [ -f gatekeeper_report.json ]; then
-            DECISION=$(python -c "
-            import json
-            with open('gatekeeper_report.json') as f:
-                r = json.load(f)
-            print(r['decision'])
-            ")
+            DECISION=$(python -c "import json; print(json.load(open('gatekeeper_report.json'))['decision'])")
 
-            echo "## 🚦 Gatekeeper — Projet: ${{ inputs.project_key }}" >> $GITHUB_STEP_SUMMARY
+            echo "## 🚦 Gatekeeper — ${{ inputs.project_key }}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
 
             if [ "$DECISION" = "PASS" ]; then
               echo "### ✅ MERGE AUTORISÉ" >> $GITHUB_STEP_SUMMARY
-              echo "Tous les critères qualité sont respectés." >> $GITHUB_STEP_SUMMARY
             else
               echo "### ❌ MERGE BLOQUÉ" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "**Violations détectées :**" >> $GITHUB_STEP_SUMMARY
-              echo '```json' >> $GITHUB_STEP_SUMMARY
+              echo "**Violations :**" >> $GITHUB_STEP_SUMMARY
               python -c "
-              import json
-              with open('gatekeeper_report.json') as f:
-                  r = json.load(f)
-              for v in r['violations']:
-                  print(f\"• [{v['category']}] {v['message']}\")
-              " >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "**Métriques :**" >> $GITHUB_STEP_SUMMARY
-              echo '```json' >> $GITHUB_STEP_SUMMARY
-              python -c "
-              import json
-              with open('gatekeeper_report.json') as f:
-                  r = json.load(f)
-              print(json.dumps(r['summary'], indent=2))
-              " >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
+          import json
+          r = json.load(open('gatekeeper_report.json'))
+          for v in r['violations']:
+              print(f\"- [{v['category']}] {v['message']}\")
+          " >> $GITHUB_STEP_SUMMARY
             fi
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Métriques :**" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            python -c "import json; print(json.dumps(json.load(open('gatekeeper_report.json'))['summary'], indent=2))" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-      # ── 8. Upload rapport comme artifact ──────────────────
+      # ── 11. Upload rapport ────────────────────────────────
       - name: 📤 Upload Gate Report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gatekeeper-report-${{ inputs.project_key }}
+          name: gatekeeper-${{ inputs.project_key }}-${{ github.run_number }}
           path: gatekeeper_report.json
-
-
-
-
-
-          

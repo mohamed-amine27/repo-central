@@ -32,14 +32,9 @@ import time
 import traceback
 from typing import Any
 
-
-
-from langchain_sambanova import ChatSambaNova
-from langchain_core.messages import HumanMessage
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.graph import StateGraph, END
-
-from models.state import SonarState
+# ─── Chemin sonar-scanner — Windows local ou GitHub Actions ───
+# Sur GitHub Actions : sonar-scanner est dans le PATH après npm install -g
+# En local Windows   : chemin complet défini dans settings/config.py
 from settings.config import (
     SONARQUBE_TOKEN,
     SONARQUBE_URL,
@@ -47,8 +42,15 @@ from settings.config import (
     MODEL_NAME,
     SAMBANOVA_API_KEY,
     TEMPERATURE,
-    SONAR_SCANNER_CMD
+    SONAR_SCANNER_CMD,
 )
+
+from langchain_sambanova import ChatSambaNova
+from langchain_core.messages import HumanMessage
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.graph import StateGraph, END
+
+from models.state import SonarState
 
 
 # ═════════════════════════════════════════════════════════════
@@ -78,7 +80,7 @@ def create_llm() -> ChatSambaNova:
         model=MODEL_NAME,
         api_key=SAMBANOVA_API_KEY,
         temperature=TEMPERATURE,
-        max_tokens=8192
+        max_tokens=8192,   # ← augmenté pour rapport complet avec toutes les sections
     )
 
 
@@ -118,55 +120,41 @@ async def node_scan_if_needed(
     tools: dict,
 ) -> SonarState:
     """
-    Node 0 — Scan toujours si --path fourni pour avoir les résultats à jour.
-    - Projet absent + path fourni  → scan initial (création)
-    - Projet présent + path fourni → re-scan (mise à jour)
-    - Projet présent + pas de path → lecture résultats existants seulement
-    - Projet absent + pas de path  → erreur
+    Node 0 — Vérifie si le projet existe dans SonarQube.
+
+    Mode CI (GitHub Actions) :
+      - Le scan est déjà fait par le workflow (PR mode incrémental)
+      - L'agent ne fait QUE lire les résultats ⚡
+
+    Mode local :
+      - Projet absent → crée sonar-project.properties et lance sonar-scanner
+      - Projet présent → re-scan pour mettre à jour
     """
     print("  🔎 [0/7] Vérification existence projet...")
 
-    project_path = state.get("project_path", "")
-    path_fourni  = bool(project_path and os.path.isdir(project_path))
-
-    # ── Vérifier existence projet dans SonarQube ───────────
-    exists = False
-    try:
-        result = _parse(await tools["get_quality_gate_status"].ainvoke(
-            {"projectKey": state["project_key"]}
-        ))
-        if result and "status" in result:
-            exists = True
-        elif isinstance(result, dict) and result.get("status") == 404:
-            exists = False
-        else:
-            exists = True
-    except Exception as e:
-        error_str = str(e)
-        if "404" in error_str or "not found" in error_str.lower():
-            exists = False
-        else:
-            exists = True
-
-    print(f"      → Projet SonarQube : {'✅ existe' if exists else '❌ absent'}")
-    print(f"      → Path fourni      : {'✅ ' + project_path if path_fourni else '❌ non fourni'}")
-
-    # ── Cas 1 : projet présent + pas de path → lecture seule
-    if exists and not path_fourni:
-        print(f"      → 📖 Lecture résultats existants (pas de re-scan sans --path)")
+    # Mode CI : skip scan (déjà fait par le workflow)
+    is_ci = os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
+    if is_ci:
+        print(f"      → 🤖 Mode CI : scan déjà effectué par le workflow")
+        print(f"      → 📖 Lecture des résultats SonarQube uniquement")
         return {**state, "scan_done": False}
 
-    # ── Cas 2 : projet absent + pas de path → erreur
-    if not exists and not path_fourni:
-        msg = "Projet absent de SonarQube et --path non fourni — impossible d'analyser"
-        print(f"      → ❌ {msg}")
-        return {**state, "scan_done": False, "error": msg}
+    try:
+        result = _parse(await tools["search_sonar_projects"].ainvoke(
+            {"query": state["project_key"]}
+        ))
+        projects = result.get("components", [])
+        exists = any(p["key"] == state["project_key"] for p in projects)
+    except Exception as e:
+        print(f"      ⚠️  Erreur recherche projet : {e}")
+        exists = False
 
-    # ── Cas 3 & 4 : path fourni → scan dans tous les cas ───
     if exists:
-        print(f"      → 🔄 Re-scan pour mettre à jour les résultats...")
-    else:
-        print(f"      → 🆕 Scan initial — création du projet dans SonarQube...")
+        print(f"      → ✅ Projet '{state['project_key']}' trouvé dans SonarQube")
+        return {**state, "scan_done": False}
+
+    print(f"      → ⚠️  Projet absent — lancement du scan automatique...")
+    project_path = state.get("project_path", ".")
 
     # Créer sonar-project.properties si absent
     props_file = os.path.join(project_path, "sonar-project.properties")
@@ -214,33 +202,28 @@ async def node_scan_if_needed(
         print(f"      → ❌ {msg}")
         return {**state, "scan_done": False, "error": msg}
 
+
 async def node_check_quality_gate(
     state: SonarState,
     tools: dict,
 ) -> SonarState:
+    """
+    Node 1 — Récupère le statut Quality Gate SonarQube.
+    Info seulement — la vraie décision est prise par node_evaluate_quality.
+    """
     print("  📊 [1/7] Quality Gate SonarQube...")
     try:
         result = _parse(await tools["get_quality_gate_status"].ainvoke(
             {"projectKey": state["project_key"]}
         ))
-        project_status = result.get("projectStatus", {})
-        sonar_status   = project_status.get("status", "UNKNOWN")
-        conditions     = project_status.get("conditions", [])
-        
+        sonar_status = result.get("status", "UNKNOWN")
         print(f"      → SonarQube gate : {sonar_status}")
-        if conditions:
-            for c in conditions:
-                print(f"         • {c.get('metricKey')} : {c.get('status')} "
-                      f"(actual={c.get('actualValue')}, threshold={c.get('errorThreshold')})")
-
-        return {
-            **state,
-            "quality_gate": project_status,  # ← stocke projectStatus directement
-            "gate_failed":  False,
-        }
+        return {**state, "quality_gate": result, "gate_failed": False}
     except Exception as e:
         print(f"      ⚠️  Erreur quality gate : {e}")
         return {**state, "quality_gate": {}, "gate_failed": False}
+
+
 async def node_fetch_issues(
     state: SonarState,
     tools: dict,
@@ -378,7 +361,7 @@ async def node_get_measures(
                 "new_coverage",
             ],
         }))
- 
+
         # ── Parser la liste measures → dict plat ───────────
         # Format SonarQube : {"component": {"measures": [{"metric": "bugs", "value": "1"}, ...]}}
         raw_list = result.get("component", {}).get("measures", [])
@@ -389,13 +372,12 @@ async def node_get_measures(
                 flat[metric] = entry["value"]
             elif "period" in entry:
                 flat[metric] = entry["period"].get("value", "0")
- 
+
         print(f"      → {len(flat)} métriques extraites : {list(flat.keys())[:8]}...")
         return {**state, "measures": flat}
     except Exception as e:
         print(f"      ⚠️  Erreur measures : {e}")
         return {**state, "measures": {}}
- 
 
 
 async def node_evaluate_quality(state: SonarState) -> SonarState:
@@ -476,24 +458,24 @@ async def node_generate_report(
     Affiche TOUTES les issues récupérées triées par sévérité.
     """
     print("  📝 [7/7] Génération du rapport LLM...")
- 
+
     real_status     = "FAIL ❌" if state.get("gate_failed") else "PASS ✅"
     sonar_status    = state["quality_gate"].get("status", "UNKNOWN")
     quality_reasons = state.get("quality_reasons", [])
     measures        = state.get("measures", {})
- 
+
     # ── Helper extraction métrique ──────────────────────────
     def m(key: str, default: str = "N/A") -> str:
         val = measures.get(key, default)
         if isinstance(val, dict):
             val = val.get("value", default)
         return str(val) if val not in (None, "", {}) else default
- 
+
     # Ratings 1.0→E, 2.0→D, etc.
     ratings = {"1.0": "A ✅", "2.0": "B ✅", "3.0": "C ⚠️", "4.0": "D ❌", "5.0": "E ❌"}
     def rating(key: str) -> str:
         return ratings.get(m(key), m(key))
- 
+
     # Coverage niveau
     def cov_level(val: str) -> str:
         try:
@@ -501,7 +483,7 @@ async def node_generate_report(
             return "✅" if v >= 80 else "⚠️" if v >= 20 else "❌"
         except Exception:
             return "N/A"
- 
+
     # Complexité niveau
     def complex_level(val: str) -> str:
         try:
@@ -509,29 +491,29 @@ async def node_generate_report(
             return "✅" if v <= 10 else "⚠️" if v <= 20 else "❌"
         except Exception:
             return "N/A"
- 
+
     metrics_summary = f"""
 🔴 FIABILITÉ
    • Issues (Bugs)               : {m('bugs')}
    • Rating                      : {rating('reliability_rating')}
    • Remediation Effort          : {m('reliability_remediation_effort')} min
- 
+
 🔐 SÉCURITÉ
    • Vulnérabilités              : {m('vulnerabilities')}
    • Rating                      : {rating('security_rating')}
    • Remediation Effort          : {m('security_remediation_effort')} min
- 
+
 🔎 SECURITY REVIEW
    • Hotspots détectés           : {m('security_hotspots')}
    • Hotspots révisés            : {m('security_hotspots_reviewed')}
    • Rating review               : {rating('security_review_rating')}
- 
+
 🧹 MAINTENABILITÉ
    • Code Smells                 : {m('code_smells')}
    • Rating                      : {rating('sqale_rating')}
    • Dette technique             : {m('sqale_index')} min
    • Debt Ratio                  : {m('sqale_debt_ratio')}%
- 
+
 🧪 COUVERTURE
    • Coverage global             : {m('coverage')}% {cov_level(m('coverage'))}
    • Line Coverage               : {m('line_coverage')}%
@@ -542,15 +524,15 @@ async def node_generate_report(
    • Uncovered Conditions        : {m('uncovered_conditions')}
    • Tests                       : {m('tests')}
    • Taux succès tests           : {m('test_success_density')}%
- 
+
 📋 DUPLICATIONS
    • Taux de duplication         : {m('duplicated_lines_density')}%
    • Blocs dupliqués             : {m('duplicated_blocks')}
- 
+
 🧠 COMPLEXITÉ
    • Complexité cyclomatique     : {m('complexity')} {complex_level(m('complexity'))}
    • Complexité cognitive        : {m('cognitive_complexity')} {complex_level(m('cognitive_complexity'))}
- 
+
 📦 TAILLE DU CODE
    • Lines of Code (ncloc)       : {m('ncloc')}
    • Lines                       : {m('lines')}
@@ -561,17 +543,17 @@ async def node_generate_report(
    • Classes                     : {m('classes')}
    • Comment Lines               : {m('comment_lines')}
    • Comments (%)                : {m('comment_lines_density')}%
- 
+
 🆕 NOUVEAUX PROBLÈMES (depuis dernier scan)
    • Nouveaux bugs               : {m('new_bugs')}
    • Nouvelles vulnérabilités    : {m('new_vulnerabilities')}
    • Nouveaux code smells        : {m('new_code_smells')}
    • Nouveau coverage            : {m('new_coverage')}%
 """
- 
+
     # ── Grouper les issues identiques (même message) ───────
     severity_order = {"BLOCKER": 0, "CRITICAL": 1, "MAJOR": 2, "MINOR": 3, "INFO": 4}
- 
+
     # Grouper par (severity, message normalisé)
     groups: dict[tuple, dict] = {}
     for iss in state["issue_contexts"]:
@@ -589,23 +571,23 @@ async def node_generate_report(
         )
         line = iss.get("line", "?")
         groups[key]["locations"].append(f"{component}:{line}")
- 
+
     # Trier par sévérité
     sorted_groups = sorted(
         groups.values(),
         key=lambda x: severity_order.get(x["severity"], 4)
     )
- 
+
     # Formater les issues groupées
     grouped_issues = "\n".join([
         f"  {i+1:>3}. [{g['severity']:8}] {g['message']}\n"
         f"         → {' | '.join(g['locations'])}"
         for i, g in enumerate(sorted_groups)
     ]) or "  Aucune issue détectée"
- 
+
     total_issues   = len(state["issue_contexts"])
     unique_issues  = len(sorted_groups)
- 
+
     # Résumé par sévérité
     severity_counts = {}
     for iss in state["issue_contexts"]:
@@ -618,34 +600,34 @@ async def node_generate_report(
             key=lambda x: severity_order.get(x[0], 9)
         )
     ])
- 
+
     scan_info = (
         "⚠️  Projet scanné automatiquement lors de cette analyse."
         if state.get("scan_done")
         else "Projet déjà présent dans SonarQube."
     )
- 
+
     prompt = f"""Tu es un expert qualité logicielle. Génère un rapport COMPLET avec TOUTES les sections ci-dessous.
 IMPORTANT : toutes les sections sont obligatoires, ne pas en sauter aucune.
- 
+
 PROJET      : {state['project_key']}
 SCAN INFO   : {scan_info}
 DÉCISION    : {real_status}
 SONARQUBE   : {sonar_status} (notre évaluation corrige le biais "New Code Only")
 RAISONS     : {', '.join(quality_reasons) if quality_reasons else 'Aucune'}
- 
+
 ━━━ MÉTRIQUES ━━━
 {metrics_summary}
- 
+
 ━━━ ISSUES GROUPÉES ({total_issues} occurrences → {unique_issues} issues uniques — {severity_summary}) ━━━
 (même issue regroupée avec tous ses fichiers/lignes)
 {grouped_issues}
- 
+
 ━━━ FORMAT OBLIGATOIRE — REPRODUIRE TOUTES CES SECTIONS ━━━
- 
+
 ## 🏥 Statut Global
 [PASS ✅ / FAIL ❌] — 1 phrase (baser sur DÉCISION)
- 
+
 ## 📊 Tableau de Bord Qualité
 | Catégorie          | Indicateur                        | Valeur              | Niveau       |
 |--------------------|-----------------------------------|---------------------|--------------|
@@ -667,18 +649,18 @@ RAISONS     : {', '.join(quality_reasons) if quality_reasons else 'Aucune'}
 |                    | Statements / Files                | X / X               | —            |
 |                    | Comment Lines / Comments (%)      | X / X%              | —            |
 | 🆕 Nouveautés      | Bugs / Vulnés / Smells nouveaux   | X / X / X           | ✅ / ⚠️ / ❌ |
- 
+
 ## 🐛 Issues ({total_issues} occurrences → {unique_issues} uniques — {severity_summary})
 (reproduire TOUTES les issues groupées du prompt — même issue = 1 ligne avec tous les fichiers)
 N. [SEVERITY] description
    → fichier1:ligne1 | fichier2:ligne2 | ...
- 
+
 ## 🔐 Analyse Sécurité
 - État global : [critique / élevé / modéré / faible]
 - Vulnérabilités : X — risque principal en 1 phrase
 - Hotspots : X à revoir
 - Recommandation : 1 action urgente concrète
- 
+
 ## ✅ Actions Prioritaires
 IMPORTANT : écrire exactement 5 actions complètes, ne pas tronquer.
 1. [URGENT]    action complète — fichier:ligne si disponible
@@ -686,7 +668,7 @@ IMPORTANT : écrire exactement 5 actions complètes, ne pas tronquer.
 3. [IMPORTANT] action complète
 4. [IMPORTANT] action complète
 5. [NORMAL]    action complète
- 
+
 ## 📈 Tendance
 IMPORTANT : cette section est obligatoire, ne pas l'omettre.
 Choisir : [S'améliore ↗ / Se dégrade ↘ / Stable →]
@@ -695,16 +677,16 @@ Justification en 1 phrase basée sur :
 - Nouvelles vulnérabilités : {m('new_vulnerabilities')}
 - Nouveaux code smells : {m('new_code_smells')}
 """
- 
+
     response = await llm.ainvoke([HumanMessage(content=prompt)])
     report   = response.content
- 
+
     print("\n" + "═" * 60)
     print(report)
     print("═" * 60)
- 
+
     return {**state, "report": report}
- 
+
 
 # ═════════════════════════════════════════════════════════════
 # GRAPH BUILDER

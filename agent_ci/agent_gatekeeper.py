@@ -22,11 +22,7 @@ import traceback
 from typing import Any
 
 from agent_sonarqube import run_sonar_analysis
-from settings.config import (
-    SONARQUBE_TOKEN,
-    SONARQUBE_URL,
-    SAMBANOVA_API_KEY,
-)
+
 
 
 # ═════════════════════════════════════════════════════════════

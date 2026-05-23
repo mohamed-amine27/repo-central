@@ -3,7 +3,7 @@ Agent SonarCloud — DevOps Agent complet adapté pour SonarCloud.
 Différences avec version SonarQube :
   - URL fixe : https://sonarcloud.io
   - Paramètre 'organization' obligatoire sur tous les appels MCP
-  - Mode CI : skip scan (déjà fait par le workflow)
+  - Scan et indexation gérés par l'agent (pas le workflow)
 """
 
 from __future__ import annotations
@@ -131,39 +131,59 @@ def _with_org(params: dict) -> dict:
 # NODES
 # ═════════════════════════════════════════════════════════════
 
+async def _wait_indexation(project_key: str, max_wait: int = 90, interval: int = 5) -> bool:
+    """
+    Attend que SonarCloud ait indexé les résultats du scan.
+    Interroge l'API REST jusqu'à ce que le status ne soit
+    plus UNKNOWN, ou jusqu'au timeout.
+    Returns True si indexation confirmée, False si timeout.
+    """
+    import urllib.request
+    import base64
+
+    url = (
+        f"https://sonarcloud.io/api/qualitygates/project_status"
+        f"?projectKey={project_key}"
+    )
+    credentials = base64.b64encode(f"{SONAR_TOKEN}:".encode()).decode()
+    headers = {"Authorization": f"Basic {credentials}"}
+
+    print(f"      ⏳ Attente indexation SonarCloud (max {max_wait}s)...")
+    elapsed = 0
+    while elapsed < max_wait:
+        try:
+            req  = urllib.request.Request(url, headers=headers)
+            resp = urllib.request.urlopen(req, timeout=10)
+            data = json.loads(resp.read().decode())
+            status = data.get("projectStatus", {}).get("status", "UNKNOWN")
+            print(f"         [{elapsed:>3}s] status = {status}")
+            if status not in ("UNKNOWN", ""):
+                print(f"      ✅ Indexation confirmée ({status}) en {elapsed}s")
+                return True
+        except Exception as e:
+            print(f"         [{elapsed:>3}s] ⚠️  {e}")
+
+        await asyncio.sleep(interval)
+        elapsed += interval
+
+    print(f"      ⚠️  Timeout {max_wait}s — on continue quand même")
+    return False
+
+
 async def node_scan_if_needed(state: SonarState, tools: dict) -> SonarState:
     """
-    Mode CI → skip scan (déjà fait par le workflow)
-    Mode local → scan via sonar-scanner
+    Lance toujours le scan sonar-scanner depuis l'agent,
+    puis attend que SonarCloud indexe les résultats.
+    Fonctionne en local ET en CI (le workflow ne fait plus le scan).
     """
-    print("  🔎 [0/7] Vérification existence projet...")
+    print("  🔎 [0/7] Scan SonarCloud + attente indexation...")
 
-    is_ci = os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
-    if is_ci:
-        print(f"      → 🤖 Mode CI : scan déjà effectué par le workflow")
-        return {**state, "scan_done": False}
-
-    # Mode local : check existence
-    try:
-        result = _parse(await tools["search_sonar_projects"].ainvoke(
-            _with_org({"query": state["project_key"]})
-        ))
-        projects = result.get("components", [])
-        exists = any(p["key"] == state["project_key"] for p in projects)
-    except Exception as e:
-        print(f"      ⚠️  Erreur recherche projet : {e}")
-        exists = False
-
-    if exists:
-        print(f"      → ✅ Projet trouvé dans SonarCloud")
-        return {**state, "scan_done": False}
-
-    print(f"      → ⚠️  Projet absent — création + scan...")
     project_path = state.get("project_path", ".")
 
-    # Créer sonar-project.properties
+    # ── Créer sonar-project.properties si absent ───────────
     props_file = os.path.join(project_path, "sonar-project.properties")
     if not os.path.exists(props_file):
+        print(f"      → Création sonar-project.properties")
         props_content = (
             f"sonar.projectKey={state['project_key']}\n"
             f"sonar.organization={SONARQUBE_ORGANIZATION}\n"
@@ -174,7 +194,8 @@ async def node_scan_if_needed(state: SonarState, tools: dict) -> SonarState:
         with open(props_file, "w", encoding="utf-8") as f:
             f.write(props_content)
 
-    # Lancer sonar-scanner
+    # ── Lancer sonar-scanner ───────────────────────────────
+    print(f"      → Lancement sonar-scanner sur {project_path}")
     try:
         proc = await asyncio.create_subprocess_exec(
             SONAR_SCANNER_CMD,
@@ -189,19 +210,22 @@ async def node_scan_if_needed(state: SonarState, tools: dict) -> SonarState:
         )
         stdout, stderr = await proc.communicate()
 
-        if proc.returncode == 0:
-            print(f"      → ✅ Scan terminé")
-            await asyncio.sleep(5)
-            return {**state, "scan_done": True}
-        else:
+        if proc.returncode != 0:
             error_msg = stderr.decode(errors="replace")[:500]
-            print(f"      → ❌ Scan échoué : {error_msg}")
+            print(f"      → ❌ Scan échoué (code {proc.returncode}) : {error_msg}")
             return {**state, "scan_done": False, "error": error_msg}
+
+        print(f"      → ✅ Scan terminé (exit 0)")
 
     except FileNotFoundError:
         msg = f"sonar-scanner introuvable : {SONAR_SCANNER_CMD}"
         print(f"      → ❌ {msg}")
         return {**state, "scan_done": False, "error": msg}
+
+    # ── Attendre l'indexation SonarCloud ──────────────────
+    await _wait_indexation(state["project_key"], max_wait=90, interval=5)
+
+    return {**state, "scan_done": True}
 
 
 async def node_check_quality_gate(state: SonarState, tools: dict) -> SonarState:

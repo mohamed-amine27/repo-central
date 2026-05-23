@@ -83,20 +83,7 @@ jobs:
           npm install -g sonarqube-scanner sonarqube-api-mcp
           echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
 
-      # ── Scan SonarCloud (action officielle) ───────────────
-      - name: 🔍 SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@v3
-        env:
-          SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectBaseDir: project_code
-          args: >
-            -Dsonar.projectKey=${{ inputs.project_key }}
-            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
-
-      - name: ⏳ Wait indexation
-        run: sleep 8
+      # ── Scan + indexation gérés par l'agent ──────────────
 
       - name: 🚦 Run Gatekeeper
         id:   gate

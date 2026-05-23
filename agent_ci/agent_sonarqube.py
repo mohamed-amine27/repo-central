@@ -84,11 +84,39 @@ def build_tool_registry(all_tools: list) -> dict[str, Any]:
 # ═════════════════════════════════════════════════════════════
 
 def _parse(result: Any) -> Any:
+    """
+    Normalise la réponse MCP en dict ou list exploitable.
+
+    Les tools MCP retournent parfois :
+      - une str JSON  → on parse
+      - une liste de ToolMessage/ContentBlock → on extrait le texte du 1er item
+      - un dict       → on retourne tel quel
+    """
+    # ── Cas 1 : liste (ex. [TextContent(text='{"projectStatus":...}')])
+    if isinstance(result, list):
+        if not result:
+            return {}
+        first = result[0]
+        # LangChain ToolMessage / ContentBlock avec attribut .text ou .content
+        text = getattr(first, "text", None) or getattr(first, "content", None)
+        if text and isinstance(text, str):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {}
+        # Si c'est directement un dict dans la liste
+        if isinstance(first, dict):
+            return first
+        return {}
+
+    # ── Cas 2 : chaîne JSON brute
     if isinstance(result, str):
         try:
             return json.loads(result)
         except json.JSONDecodeError:
             return {}
+
+    # ── Cas 3 : dict ou autre → tel quel
     return result if result else {}
 
 

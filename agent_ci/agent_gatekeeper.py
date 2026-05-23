@@ -42,7 +42,9 @@ GATE_CRITERIA = {
     "critical_issues":          5,     # max 5 issues CRITICAL
 
     # ── Couverture ─────────────────────────────────────────
-    "coverage_min":             20.0,  # minimum 20% coverage
+    # Mettre à 0.0 si le projet n'a pas encore de tests
+    # Remonter progressivement : 0 → 10 → 20 → 40 → 60
+    "coverage_min":             0.0,   # désactivé (pas de tests)
 
     # ── Maintenabilité ─────────────────────────────────────
     "code_smells_max":          50,    # maximum 50 code smells

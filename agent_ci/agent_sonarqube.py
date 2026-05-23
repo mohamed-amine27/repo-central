@@ -45,7 +45,7 @@ from langgraph.graph import StateGraph, END
 
 from models.state import SonarState
 from settings.config import (
-    SONARQUBE_TOKEN,
+    SONAR_TOKEN,
     SONARQUBE_URL,
     MAX_ISSUES,
     MODEL_NAME,
@@ -79,7 +79,7 @@ def get_mcp_config() -> dict:
             "command":   "sonarqube-api-mcp",
             "args":      [],
             "env": {
-                "SONAR_TOKEN":        SONARQUBE_TOKEN,
+                "SONAR_TOKEN":        SONAR_TOKEN,
                 "SONAR_HOST_URL":     SONARQUBE_URL,
                 "SONAR_ORGANIZATION": SONARQUBE_ORGANIZATION,
             },
@@ -196,7 +196,7 @@ async def node_scan_if_needed(
             f"sonar.projectName={state['project_key']}\n"
             f"sonar.sources=.\n"
             f"sonar.host.url={SONARQUBE_URL}\n"
-            f"sonar.token={SONARQUBE_TOKEN}\n"
+            f"sonar.token={SONAR_TOKEN}\n"
         )
         with open(props_file, "w", encoding="utf-8") as f:
             f.write(props_content)
@@ -212,7 +212,7 @@ async def node_scan_if_needed(
             f"-Dsonar.projectName={state['project_key']}",
             "-Dsonar.sources=.",
             f"-Dsonar.host.url={SONARQUBE_URL}",
-            f"-Dsonar.token={SONARQUBE_TOKEN}",
+            f"-Dsonar.token={SONAR_TOKEN}",
             cwd=project_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

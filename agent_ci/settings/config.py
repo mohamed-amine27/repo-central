@@ -1,6 +1,7 @@
 import os
-SONARQUBE_URL   = "https://singular-exploit-mockup.ngrok-free.dev/"
-SONARQUBE_TOKEN = "squ_3b9650b819403f57b9e4b2b53797bb7bddfbb33f"
+SONARQUBE_URL   = "https://sonarcloud.io"
+SONAR_TOKEN = "caa8b76e83b76459b1296b4d009d9330d07f4d88"
+SONARQUBE_ORGANIZATION = "mohamed-amine27"
 MAX_ISSUES      = 30  
 SONAR_SCANNER_CMD = os.getenv("SONAR_SCANNER_CMD", "sonar-scanner")
 MODEL_NAME = "Meta-Llama-3.3-70B-Instruct" 

@@ -1,8 +1,8 @@
-name: 🚦 Gatekeeper Reusable (PR Mode)
+name: 🚦 Gatekeeper Reusable (SonarCloud)
 
 # ════════════════════════════════════════════════════════════
-# Scan PR incrémental — analyse uniquement les fichiers modifiés
-# Cache massif : sonar-scanner + JRE + dépendances réutilisés
+# Gatekeeper avec SonarCloud (pas besoin de ngrok)
+# Scan PR incrémental + Cache massif
 # Durée moyenne : 30s-1min après premier run
 # ════════════════════════════════════════════════════════════
 
@@ -22,7 +22,9 @@ on:
         type: string
 
     secrets:
-      SONARQUBE_TOKEN:
+      SONAR_TOKEN:
+        required: true
+      SONAR_ORGANIZATION:
         required: true
       SAMBANOVA_API_KEY:
         required: true
@@ -37,21 +39,19 @@ jobs:
   gatekeeper:
     name: 🚦 Quality Gatekeeper
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 6
 
     outputs:
       decision:         ${{ steps.gate.outputs.decision }}
       violations_count: ${{ steps.gate.outputs.violations_count }}
 
     steps:
-      # ── 1. Checkout code (avec historique pour diff PR) ───
-      - name: 📥 Checkout code du projet
+      - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
-          path:         project_code
-          fetch-depth:  0
+          path:        project_code
+          fetch-depth: 0
 
-      # ── 2. Checkout repo-central ──────────────────────────
       - name: 📥 Checkout repo-central
         uses: actions/checkout@v4
         with:
@@ -59,7 +59,6 @@ jobs:
           path:       repo-central
           token:      ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 3. Setup Python ───────────────────────────────────
       - name: 🐍 Setup Python ${{ inputs.python_version }}
         uses: actions/setup-python@v5
         with:
@@ -67,70 +66,48 @@ jobs:
           cache: pip
           cache-dependency-path: repo-central/requirements.txt
 
-      # ── 4. Cache JRE + npm (gain massif après 1er run) ────
-      - name: 💾 Cache SonarScanner JRE & npm globals
+      - name: 💾 Cache SonarScanner & npm
         uses: actions/cache@v4
         with:
           path: |
             ~/.sonar
             ~/.npm-global
-          key: ${{ runner.os }}-sonar-scanner-v2
+          key: ${{ runner.os }}-sonarcloud-v1
 
-      # ── 5. Installer dépendances Python ───────────────────
       - name: 📦 Install Python deps
         run: pip install -r repo-central/requirements.txt
 
-      # ── 6. Installer sonar-scanner + MCP ──────────────────
       - name: 🔧 Install sonar-scanner + MCP
         run: |
           npm config set prefix '~/.npm-global'
           npm install -g sonarqube-scanner sonarqube-api-mcp
           echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
 
-      # ── 7. Scan SonarQube en mode PR (incrémental) ────────
-      - name: 🔍 SonarQube PR Scan (incrémental)
-        working-directory: project_code
+      # ── Scan SonarCloud (action officielle) ───────────────
+      - name: 🔍 SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@v3
         env:
-          SONAR_TOKEN:    ${{ secrets.SONARQUBE_TOKEN }}
-          SONAR_HOST_URL: "https://singular-exploit-mockup.ngrok-free.dev"
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "🔀 Mode Pull Request — scan incrémental (fichiers modifiés uniquement)"
-            sonar-scanner \
-              -Dsonar.projectKey=${{ inputs.project_key }} \
-              -Dsonar.projectName=${{ inputs.project_key }} \
-              -Dsonar.sources=. \
-              -Dsonar.host.url=$SONAR_HOST_URL \
-              -Dsonar.token=$SONAR_TOKEN \
-              -Dsonar.pullrequest.key=${{ github.event.pull_request.number }} \
-              -Dsonar.pullrequest.branch=${{ github.head_ref }} \
-              -Dsonar.pullrequest.base=${{ github.base_ref }} \
-              -Dsonar.scm.provider=git
-          else
-            echo "📊 Mode Branch — scan complet"
-            sonar-scanner \
-              -Dsonar.projectKey=${{ inputs.project_key }} \
-              -Dsonar.projectName=${{ inputs.project_key }} \
-              -Dsonar.sources=. \
-              -Dsonar.host.url=$SONAR_HOST_URL \
-              -Dsonar.token=$SONAR_TOKEN
-          fi
+          SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectBaseDir: project_code
+          args: >
+            -Dsonar.projectKey=${{ inputs.project_key }}
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
 
-      # ── 8. Attendre indexation SonarQube ──────────────────
-      - name: ⏳ Wait for SonarQube indexing
-        run: sleep 5
+      - name: ⏳ Wait indexation
+        run: sleep 8
 
-      # ── 9. Lancer Gatekeeper (lit les résultats) ──────────
       - name: 🚦 Run Gatekeeper
         id:   gate
         timeout-minutes: 3
         env:
-          SONARQUBE_TOKEN:   ${{ secrets.SONARQUBE_TOKEN }}
-          SONARQUBE_URL:     "https://singular-exploit-mockup.ngrok-free.dev"
-          SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
-          SONAR_SCANNER_CMD: "sonar-scanner"
-          CI:                "true"
-          GITHUB_ACTIONS:    "true"
+          SONAR_TOKEN:        ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL:     "https://sonarcloud.io"
+          SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
+          SAMBANOVA_API_KEY:  ${{ secrets.SAMBANOVA_API_KEY }}
+          CI:                 "true"
+          GITHUB_ACTIONS:     "true"
         run: |
           cd repo-central/agent_ci
           python agent_gatekeeper.py \
@@ -148,7 +125,6 @@ jobs:
           echo "violations_count=$VIOLATIONS" >> $GITHUB_OUTPUT
           echo "✅ Decision: $DECISION | Violations: $VIOLATIONS"
 
-      # ── 10. Résumé dans GitHub Actions UI ─────────────────
       - name: 📊 Gate Summary
         if: always()
         run: |
@@ -179,8 +155,7 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-      # ── 11. Upload rapport ────────────────────────────────
-      - name: 📤 Upload Gate Report
+      - name: 📤 Upload Report
         if: always()
         uses: actions/upload-artifact@v4
         with:

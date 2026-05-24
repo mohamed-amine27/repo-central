@@ -188,24 +188,44 @@ async def node_scan_if_needed(
     # ═══════════════════════════════════════════════════════
     if is_ci:
         print(f"      → 🤖 Mode CI : scan effectué par l'action SonarCloud officielle")
-        print(f"      → ⏳ Attente indexation SonarCloud (max 60s)...")
+        print(f"      → ⏳ Attente indexation SonarCloud (max 90s)...")
 
-        max_wait = 60
-        interval = 8
+        max_wait = 90
+        interval = 6
         elapsed  = 0
 
+        # On utilise get_component_measures avec 'ncloc' comme indicateur
+        # d'indexation — c'est la métrique de base qui apparaît immédiatement
+        # après scan, contrairement au Quality Gate qui peut rester UNKNOWN
+        # tant que les conditions ne sont pas calculées.
         while elapsed < max_wait:
             try:
-                chk = _parse(await tools["get_quality_gate_status"].ainvoke(
-                    {"projectKey": state["project_key"], "organization": SONARQUBE_ORGANIZATION}
-                ))
-                status = chk.get("projectStatus", {}).get("status", "UNKNOWN") if chk else "UNKNOWN"
-                if status not in ("UNKNOWN", ""):
-                    print(f"      → ✅ Indexation confirmée ({elapsed}s) — status: {status}")
-                    return {**state, "scan_done": True}
-                print(f"      → ⏳ Status: {status} ({elapsed}s)")
+                chk = _parse(await tools["get_component_measures"].ainvoke({
+                    "projectKey":   state["project_key"],
+                    "organization": SONARQUBE_ORGANIZATION,
+                    "metricKeys":   ["ncloc", "files"],
+                }))
+
+                # Si on a un component avec des measures → projet indexé
+                measures = chk.get("component", {}).get("measures", [])
+
+                if measures and len(measures) > 0:
+                    # Vérifier qu'au moins une métrique a une valeur
+                    has_data = any(m.get("value") for m in measures)
+                    if has_data:
+                        ncloc = next((m["value"] for m in measures if m["metric"] == "ncloc"), "?")
+                        files = next((m["value"] for m in measures if m["metric"] == "files"), "?")
+                        print(f"      → ✅ Indexation confirmée ({elapsed}s) — ncloc={ncloc}, files={files}")
+                        return {**state, "scan_done": True}
+
+                print(f"      → ⏳ Métriques pas encore disponibles ({elapsed}s)")
+
             except Exception as e:
-                print(f"      → ⏳ Polling ({elapsed}s)...")
+                error_str = str(e)
+                if "404" in error_str or "not found" in error_str.lower():
+                    print(f"      → ⏳ Projet pas encore créé ({elapsed}s)")
+                else:
+                    print(f"      → ⏳ Polling... ({elapsed}s)")
 
             await asyncio.sleep(interval)
             elapsed += interval

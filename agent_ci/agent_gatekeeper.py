@@ -313,6 +313,27 @@ async def run_gatekeeper(
     issues   = sonar_result.get("issue_contexts", [])
     report   = sonar_result.get("report", "")
 
+    # ── Garde-fou : métriques vides = données non fiables ──
+    if not measures:
+        print("\n⚠️  Aucune métrique SonarCloud récupérée — données non fiables")
+        print("⛔ DÉCISION FORCÉE : BLOCK (indexation incomplète ou projet non analysé)")
+        duration = time.time() - t0
+        violations = [{
+            "category": "⛔ Données",
+            "message":  "Aucune métrique disponible — SonarCloud indexation incomplète",
+            "severity": "BLOCKER",
+        }]
+        export_json_report("BLOCK", violations, project_key, branch, {})
+        print_gate_report("BLOCK", violations, project_key, branch, {}, duration)
+        return {
+            "decision":   "BLOCK",
+            "violations": violations,
+            "project":    project_key,
+            "branch":     branch,
+            "measures":   {},
+            "report":     report,
+        }
+
     # ── Étape 2 : évaluation gatekeeper ────────────────────
     print("\n🔍 Évaluation des critères gatekeeper...")
     decision, violations = evaluate_gate(measures, issues)

@@ -32,6 +32,12 @@ import time
 import traceback
 from typing import Any
 
+# ─── Chemin sonar-scanner : env CI prioritaire, fallback Windows local ───
+SONAR_SCANNER_CMD = os.environ.get(
+    "SONAR_SCANNER_CMD",
+    r"C:\Users\moham\Downloads\node-v23.7.0-win-x64"
+    r"\node-v23.7.0-win-x64\sonar-scanner.cmd",
+)
 
 from langchain_sambanova import ChatSambaNova
 from langchain_core.messages import HumanMessage
@@ -46,7 +52,7 @@ from settings.config import (
     MODEL_NAME,
     SAMBANOVA_API_KEY,
     TEMPERATURE,
-    SONARQUBE_ORGANIZATION,SONAR_SCANNER_CMD
+    SONARQUBE_ORGANIZATION
 )
 
 
@@ -149,6 +155,7 @@ def _parse(result: Any) -> Any:
     return result if result else {}
 
 
+
 # ═════════════════════════════════════════════════════════════
 # NODES
 # ═════════════════════════════════════════════════════════════
@@ -243,9 +250,34 @@ async def node_scan_if_needed(
 
         if proc.returncode == 0:
             print(f"      → ✅ Scan terminé avec succès")
-            print(f"      → ⏳ Attente indexation SonarQube (5s)...")
-            await asyncio.sleep(5)
-            return {**state, "scan_done": True}
+
+            # ── Polling indexation SonarCloud ──────────────────
+            is_ci    = os.environ.get("CI", "false").lower() == "true"
+            max_wait = 150 if is_ci else 60
+            interval = 8
+            elapsed  = 0
+            print(f"      → ⏳ Attente indexation SonarCloud (max {max_wait}s)...")
+
+            while elapsed < max_wait:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                try:
+                    chk = _parse(await tools["get_quality_gate_status"].ainvoke(
+                        {"projectKey": state["project_key"], "organisation": SONARQUBE_ORGANIZATION}
+                    ))
+                    status = chk.get("projectStatus", {}).get("status", "UNKNOWN") if chk else "UNKNOWN"
+                    print(f"      → Gate status : {status} ({elapsed}s)")
+                    if status not in ("UNKNOWN", ""):
+                        print(f"      → ✅ Indexation confirmée ({elapsed}s)")
+                        return {**state, "scan_done": True}
+                except Exception:
+                    pass  # encore en cours
+
+            # Timeout → BLOCK
+            msg = f"SonarCloud non indexé après {max_wait}s (status UNKNOWN persistant)"
+            print(f"      → ❌ {msg}")
+            return {**state, "scan_done": False, "error": msg}
+
         else:
             error_msg = stderr.decode(errors="replace")
             print(f"      → ❌ Scan échoué :\n{error_msg[:500]}")
@@ -255,6 +287,9 @@ async def node_scan_if_needed(
         msg = f"sonar-scanner introuvable : {SONAR_SCANNER_CMD}"
         print(f"      → ❌ {msg}")
         return {**state, "scan_done": False, "error": msg}
+    
+
+  
 
 async def node_check_quality_gate(
     state: SonarState,

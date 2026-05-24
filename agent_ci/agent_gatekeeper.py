@@ -286,6 +286,29 @@ async def run_gatekeeper(
     print("\n📊 Lancement analyse SonarQube...")
     sonar_result = await run_sonar_analysis(project_key, project_path)
 
+    # ── Garde-fou : scan échoué → BLOCK immédiat ───────────
+    if not sonar_result.get("scan_done", False):
+        scan_error = sonar_result.get("error", "sonar-scanner introuvable ou scan échoué")
+        print(f"\n❌ SCAN ÉCHOUÉ — {scan_error}")
+        print("⛔ DÉCISION FORCÉE : BLOCK (données SonarCloud non fiables)")
+
+        duration = time.time() - t0
+        violations = [{
+            "category": "⛔ Scan",
+            "message":  f"sonar-scanner échoué : {scan_error}",
+            "severity": "BLOCKER",
+        }]
+        export_json_report("BLOCK", violations, project_key, branch, {})
+        print_gate_report("BLOCK", violations, project_key, branch, {}, duration)
+        return {
+            "decision":   "BLOCK",
+            "violations": violations,
+            "project":    project_key,
+            "branch":     branch,
+            "measures":   {},
+            "report":     "",
+        }
+
     measures = sonar_result.get("measures", {})
     issues   = sonar_result.get("issue_contexts", [])
     report   = sonar_result.get("report", "")
@@ -356,7 +379,7 @@ Exit codes :
 
         # Exit code pour GitHub Actions :
         # 0 = PASS  → pipeline continue → merge autorisé
-        # 1 = BLOCK → pipeline échoue  → merge bloqué
+        # 1 = BLOCK → pipeline échoue  → merge bloqué (scan échoué inclus)
         sys.exit(0 if result["decision"] == "PASS" else 1)
 
     except Exception as e:

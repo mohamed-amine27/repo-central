@@ -93,6 +93,7 @@ jobs:
           SONAR_HOST_URL:     "https://sonarcloud.io"
           SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
           SAMBANOVA_API_KEY:  ${{ secrets.SAMBANOVA_API_KEY }}
+          SONAR_SCANNER_CMD:  "sonar-scanner"
           CI:                 "true"
           GITHUB_ACTIONS:     "true"
         run: |

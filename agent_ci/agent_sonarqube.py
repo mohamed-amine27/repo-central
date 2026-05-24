@@ -32,11 +32,6 @@ import time
 import traceback
 from typing import Any
 
-# ─── Chemin complet vers sonar-scanner sur Windows ────────────
-SONAR_SCANNER_CMD = (
-    r"C:\Users\moham\Downloads\node-v23.7.0-win-x64"
-    r"\node-v23.7.0-win-x64\sonar-scanner.cmd"
-)
 
 from langchain_sambanova import ChatSambaNova
 from langchain_core.messages import HumanMessage
@@ -51,7 +46,7 @@ from settings.config import (
     MODEL_NAME,
     SAMBANOVA_API_KEY,
     TEMPERATURE,
-    SONARQUBE_ORGANIZATION
+    SONARQUBE_ORGANIZATION,SONAR_SCANNER_CMD
 )
 
 

@@ -1,9 +1,8 @@
 name: 🚦 Gatekeeper Reusable (SonarCloud)
 
 # ════════════════════════════════════════════════════════════
-# Gatekeeper avec SonarCloud (pas besoin de ngrok)
-# Scan PR incrémental + Cache massif
-# Durée moyenne : 30s-1min après premier run
+# Gatekeeper avec SonarCloud — scan via action officielle
+# Pas de scan via subprocess dans l'agent — tout est délégué à l'action SonarSource
 # ════════════════════════════════════════════════════════════
 
 on:
@@ -46,12 +45,14 @@ jobs:
       violations_count: ${{ steps.gate.outputs.violations_count }}
 
     steps:
+      # ── 1. Checkout code projet (avec git history pour PR diff) ──
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
           path:        project_code
           fetch-depth: 0
 
+      # ── 2. Checkout repo-central (agent) ─────────────────
       - name: 📥 Checkout repo-central
         uses: actions/checkout@v4
         with:
@@ -59,6 +60,7 @@ jobs:
           path:       repo-central
           token:      ${{ secrets.GITHUB_TOKEN }}
 
+      # ── 3. Setup Python ──────────────────────────────────
       - name: 🐍 Setup Python ${{ inputs.python_version }}
         uses: actions/setup-python@v5
         with:
@@ -66,34 +68,47 @@ jobs:
           cache: pip
           cache-dependency-path: repo-central/requirements.txt
 
-      - name: 💾 Cache SonarScanner & npm
+      # ── 4. Cache npm globals (MCP) ───────────────────────
+      - name: 💾 Cache npm globals
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.sonar
-            ~/.npm-global
-          key: ${{ runner.os }}-sonarcloud-v1
+          path: ~/.npm-global
+          key: ${{ runner.os }}-npm-mcp-v1
 
+      # ── 5. Install Python deps ───────────────────────────
       - name: 📦 Install Python deps
         run: pip install -r repo-central/requirements.txt
 
-      - name: 🔧 Install sonar-scanner + MCP
+      # ── 6. Install MCP SonarCloud ────────────────────────
+      - name: 🔧 Install sonarqube-api-mcp
         run: |
           npm config set prefix '~/.npm-global'
-          npm install -g sonarqube-scanner sonarqube-api-mcp
+          npm install -g sonarqube-api-mcp
           echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
 
-      # ── Scan + indexation gérés par l'agent ──────────────
+      # ── 7. SCAN SonarCloud via action officielle ─────────
+      # Cette action gère le téléchargement + scan + upload
+      - name: 🔍 SonarCloud Scan (action officielle)
+        uses: SonarSource/sonarqube-scan-action@v3
+        env:
+          SONAR_TOKEN:    ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: "https://sonarcloud.io"
+        with:
+          projectBaseDir: project_code
+          args: >
+            -Dsonar.projectKey=${{ inputs.project_key }}
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+            -Dsonar.host.url=https://sonarcloud.io
 
+      # ── 8. Run Gatekeeper (lit les résultats SonarCloud) ─
       - name: 🚦 Run Gatekeeper
         id:   gate
-        timeout-minutes: 7
+        timeout-minutes: 5
         env:
           SONAR_TOKEN:        ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL:     "https://sonarcloud.io"
           SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
           SAMBANOVA_API_KEY:  ${{ secrets.SAMBANOVA_API_KEY }}
-          SONAR_SCANNER_CMD:  "sonar-scanner"
           CI:                 "true"
           GITHUB_ACTIONS:     "true"
         run: |
@@ -113,6 +128,7 @@ jobs:
           echo "violations_count=$VIOLATIONS" >> $GITHUB_OUTPUT
           echo "✅ Decision: $DECISION | Violations: $VIOLATIONS"
 
+      # ── 9. Résumé dans GitHub Actions UI ─────────────────
       - name: 📊 Gate Summary
         if: always()
         run: |
@@ -143,6 +159,7 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
+      # ── 10. Upload rapport ───────────────────────────────
       - name: 📤 Upload Report
         if: always()
         uses: actions/upload-artifact@v4

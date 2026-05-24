@@ -52,7 +52,7 @@ from settings.config import (
     MODEL_NAME,
     SAMBANOVA_API_KEY,
     TEMPERATURE,
-    SONARQUBE_ORGANIZATION
+    SONARQUBE_ORGANIZATION,
 )
 
 
@@ -165,22 +165,64 @@ async def node_scan_if_needed(
     tools: dict,
 ) -> SonarState:
     """
-    Node 0 — Scan toujours si --path fourni pour avoir les résultats à jour.
-    - Projet absent + path fourni  → scan initial (création)
-    - Projet présent + path fourni → re-scan (mise à jour)
-    - Projet présent + pas de path → lecture résultats existants seulement
-    - Projet absent + pas de path  → erreur
+    Node 0 — Vérification existence + scan conditionnel.
+
+    Mode CI (GitHub Actions) :
+      - Scan déjà fait par l'action SonarCloud officielle dans le workflow
+      - L'agent attend juste l'indexation puis lit les résultats
+      
+    Mode local :
+      - Projet présent + path → re-scan via sonar-scanner local
+      - Projet absent + path  → scan initial
+      - Pas de path           → lecture seule (erreur si absent)
     """
     print("  🔎 [0/7] Vérification existence projet...")
 
     project_path = state.get("project_path", "")
     path_fourni  = bool(project_path and os.path.isdir(project_path))
+    is_ci        = os.environ.get("CI", "false").lower() == "true" or \
+                   os.environ.get("GITHUB_ACTIONS", "false").lower() == "true"
 
-    # ── Vérifier existence projet dans SonarQube ───────────
+    # ═══════════════════════════════════════════════════════
+    # MODE CI : scan fait par le workflow, on attend juste l'indexation
+    # ═══════════════════════════════════════════════════════
+    if is_ci:
+        print(f"      → 🤖 Mode CI : scan effectué par l'action SonarCloud officielle")
+        print(f"      → ⏳ Attente indexation SonarCloud (max 60s)...")
+
+        max_wait = 60
+        interval = 8
+        elapsed  = 0
+
+        while elapsed < max_wait:
+            try:
+                chk = _parse(await tools["get_quality_gate_status"].ainvoke(
+                    {"projectKey": state["project_key"], "organization": SONARQUBE_ORGANIZATION}
+                ))
+                status = chk.get("projectStatus", {}).get("status", "UNKNOWN") if chk else "UNKNOWN"
+                if status not in ("UNKNOWN", ""):
+                    print(f"      → ✅ Indexation confirmée ({elapsed}s) — status: {status}")
+                    return {**state, "scan_done": True}
+                print(f"      → ⏳ Status: {status} ({elapsed}s)")
+            except Exception as e:
+                print(f"      → ⏳ Polling ({elapsed}s)...")
+
+            await asyncio.sleep(interval)
+            elapsed += interval
+
+        # Timeout — on continue quand même pour lire ce qui est disponible
+        print(f"      → ⚠️  Timeout indexation ({max_wait}s) — lecture des données existantes")
+        return {**state, "scan_done": False}
+
+    # ═══════════════════════════════════════════════════════
+    # MODE LOCAL : scan via sonar-scanner
+    # ═══════════════════════════════════════════════════════
+
+    # Vérifier existence projet
     exists = False
     try:
         result = _parse(await tools["get_quality_gate_status"].ainvoke(
-            {"projectKey": state["project_key"],"organisation":SONARQUBE_ORGANIZATION}
+            {"projectKey": state["project_key"], "organization": SONARQUBE_ORGANIZATION}
         ))
         if result and "status" in result:
             exists = True
@@ -195,30 +237,29 @@ async def node_scan_if_needed(
         else:
             exists = True
 
-    print(f"      → Projet SonarQube : {'✅ existe' if exists else '❌ absent'}")
-    print(f"      → Path fourni      : {'✅ ' + project_path if path_fourni else '❌ non fourni'}")
+    print(f"      → Projet SonarCloud : {'✅ existe' if exists else '❌ absent'}")
+    print(f"      → Path fourni       : {'✅ ' + project_path if path_fourni else '❌ non fourni'}")
 
-    # ── Cas 1 : projet présent + pas de path → lecture seule
+    # Cas 1 : projet présent + pas de path → lecture seule
     if exists and not path_fourni:
-        print(f"      → 📖 Lecture résultats existants (pas de re-scan sans --path)")
+        print(f"      → 📖 Lecture résultats existants")
         return {**state, "scan_done": False}
 
-    # ── Cas 2 : projet absent + pas de path → erreur
+    # Cas 2 : projet absent + pas de path → erreur
     if not exists and not path_fourni:
-        msg = "Projet absent de SonarQube et --path non fourni — impossible d'analyser"
+        msg = "Projet absent et --path non fourni"
         print(f"      → ❌ {msg}")
         return {**state, "scan_done": False, "error": msg}
 
-    # ── Cas 3 & 4 : path fourni → scan dans tous les cas ───
+    # Cas 3 & 4 : path fourni → scan
     if exists:
-        print(f"      → 🔄 Re-scan pour mettre à jour les résultats...")
+        print(f"      → 🔄 Re-scan local pour mise à jour...")
     else:
-        print(f"      → 🆕 Scan initial — création du projet dans SonarQube...")
+        print(f"      → 🆕 Scan initial local...")
 
-    # Créer sonar-project.properties si absent
+    # Créer sonar-project.properties
     props_file = os.path.join(project_path, "sonar-project.properties")
     if not os.path.exists(props_file):
-        print(f"      → 📝 Création de sonar-project.properties...")
         props_content = (
             f"sonar.projectKey={state['project_key']}\n"
             f"sonar.organization={SONARQUBE_ORGANIZATION}\n"
@@ -229,11 +270,10 @@ async def node_scan_if_needed(
         )
         with open(props_file, "w", encoding="utf-8") as f:
             f.write(props_content)
-        print(f"      → ✅ Fichier créé : {props_file}")
 
-    # Lancer sonar-scanner
+    # Lancer sonar-scanner local
     try:
-        print(f"      → 🚀 sonar-scanner en cours (peut prendre 1-2 min)...")
+        print(f"      → 🚀 sonar-scanner en cours (1-2 min)...")
         proc = await asyncio.create_subprocess_exec(
             SONAR_SCANNER_CMD,
             f"-Dsonar.projectKey={state['project_key']}",
@@ -249,39 +289,13 @@ async def node_scan_if_needed(
         stdout, stderr = await proc.communicate()
 
         if proc.returncode == 0:
-            print(f"      → ✅ Scan terminé avec succès")
-
-            # ── Polling indexation SonarCloud ──────────────────
-            is_ci    = os.environ.get("CI", "false").lower() == "true"
-            max_wait = 90 if is_ci else 60   # step timeout=7min → scan~60s → 90s polling OK
-            interval = 10
-            elapsed  = 0
-            print(f"      → ⏳ Attente indexation SonarCloud (max {max_wait}s)...")
-
-            while elapsed < max_wait:
-                await asyncio.sleep(interval)
-                elapsed += interval
-                try:
-                    chk = _parse(await tools["get_quality_gate_status"].ainvoke(
-                        {"projectKey": state["project_key"], "organisation": SONARQUBE_ORGANIZATION}
-                    ))
-                    status = chk.get("projectStatus", {}).get("status", "UNKNOWN") if chk else "UNKNOWN"
-                    print(f"      → Gate status : {status} ({elapsed}s)")
-                    if status not in ("UNKNOWN", ""):
-                        print(f"      → ✅ Indexation confirmée ({elapsed}s)")
-                        return {**state, "scan_done": True}
-                except Exception:
-                    pass  # encore en cours
-
-            # Timeout → BLOCK
-            msg = f"SonarCloud non indexé après {max_wait}s (status UNKNOWN persistant)"
-            print(f"      → ❌ {msg}")
-            return {**state, "scan_done": False, "error": msg}
-
+            print(f"      → ✅ Scan terminé")
+            await asyncio.sleep(8)
+            return {**state, "scan_done": True}
         else:
-            error_msg = stderr.decode(errors="replace")
-            print(f"      → ❌ Scan échoué :\n{error_msg[:500]}")
-            return {**state, "scan_done": False, "error": error_msg[:500]}
+            error_msg = stderr.decode(errors="replace")[:500]
+            print(f"      → ❌ Scan échoué :\n{error_msg}")
+            return {**state, "scan_done": False, "error": error_msg}
 
     except FileNotFoundError:
         msg = f"sonar-scanner introuvable : {SONAR_SCANNER_CMD}"
@@ -295,10 +309,10 @@ async def node_check_quality_gate(
     state: SonarState,
     tools: dict,
 ) -> SonarState:
-    print("  📊 [1/7] Quality Gate SonarQube...")
+    print("  📊 [1/7] Quality Gate SonarCloud...")
     try:
         result = _parse(await tools["get_quality_gate_status"].ainvoke(
-            {"projectKey": state["project_key"]}
+            {"projectKey": state["project_key"], "organization": SONARQUBE_ORGANIZATION}
         ))
         project_status = result.get("projectStatus", {})
         sonar_status   = project_status.get("status", "UNKNOWN")
@@ -329,9 +343,10 @@ async def node_fetch_issues(
     print("  🐛 [2/7] Récupération des issues...")
     try:
         result = _parse(await tools["search_sonar_issues"].ainvoke({
-            "projectKey": state["project_key"],
-            "statuses":   ["OPEN", "CONFIRMED"],
-            "ps":         MAX_ISSUES,
+            "projectKey":   state["project_key"],
+            "organization": SONARQUBE_ORGANIZATION,
+            "statuses":     ["OPEN", "CONFIRMED"],
+            "ps":           MAX_ISSUES,
         }))
         issues = result.get("issues", [])
         print(f"      → {len(issues)} issue(s) trouvée(s)")
@@ -357,7 +372,7 @@ async def node_enrich_issues(
 
         try:
             context = _parse(await tools["get_sonar_issue_context"].ainvoke(
-                {"issue_key": issue["key"]}
+                {"issue_key": issue["key"], "organization": SONARQUBE_ORGANIZATION}
             ))
             enriched_issue["context"] = context
         except Exception:
@@ -365,7 +380,7 @@ async def node_enrich_issues(
 
         try:
             rule = _parse(await tools["get_rule_details"].ainvoke(
-                {"rule_key": issue.get("rule", "")}
+                {"rule_key": issue.get("rule", ""), "organization": SONARQUBE_ORGANIZATION}
             ))
             enriched_issue["rule_details"] = rule
         except Exception:
@@ -386,7 +401,7 @@ async def node_get_fix_plan(
     print("  🗺️  [4/7] Plan de correction...")
     try:
         result = _parse(await tools["get_sonar_fix_plan"].ainvoke(
-            {"projectKey": state["project_key"]}
+            {"projectKey": state["project_key"], "organization": SONARQUBE_ORGANIZATION}
         ))
         return {**state, "fix_plan": result}
     except Exception as e:
@@ -404,7 +419,8 @@ async def node_get_measures(
     print("  📈 [5/7] Métriques projet...")
     try:
         result = _parse(await tools["get_component_measures"].ainvoke({
-            "projectKey": state["project_key"],
+            "projectKey":   state["project_key"],
+            "organization": SONARQUBE_ORGANIZATION,
             "metricKeys": [
                 # ── Fiabilité ──────────────────────────────
                 "bugs",

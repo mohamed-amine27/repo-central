@@ -39,7 +39,7 @@ jobs:
   gatekeeper:
     name: 🚦 Quality Gatekeeper
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
 
     outputs:
       decision:         ${{ steps.gate.outputs.decision }}
@@ -87,7 +87,7 @@ jobs:
 
       - name: 🚦 Run Gatekeeper
         id:   gate
-        timeout-minutes: 3
+        timeout-minutes: 7
         env:
           SONAR_TOKEN:        ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL:     "https://sonarcloud.io"

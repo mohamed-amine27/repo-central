@@ -253,8 +253,8 @@ async def node_scan_if_needed(
 
             # ── Polling indexation SonarCloud ──────────────────
             is_ci    = os.environ.get("CI", "false").lower() == "true"
-            max_wait = 150 if is_ci else 60
-            interval = 8
+            max_wait = 90 if is_ci else 60   # step timeout=7min → scan~60s → 90s polling OK
+            interval = 10
             elapsed  = 0
             print(f"      → ⏳ Attente indexation SonarCloud (max {max_wait}s)...")
 
